@@ -40,7 +40,7 @@ jobs:
     steps:
       # Fork PR head as data only (see SECURITY note above). fetch-depth: 0 so we
       # can diff against, and read files from, the base branch.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
