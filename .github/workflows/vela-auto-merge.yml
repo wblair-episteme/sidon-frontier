@@ -63,22 +63,34 @@ jobs:
             exit 0
           }
 
-          # 1. THE FLOOR. Replay + signatures + hash parity, then a fresh frozen
-          #    re-run of every stored witness, on the tree that would merge. Any
-          #    tampering with signed, accepted state fails right here.
-          vela check . >/dev/null
-          vela reproduce . >/dev/null
+          # 1. THE FLOOR. Replay the signed event log (--strict) and re-run every
+          #    frozen verifier on every witness, on the tree that would merge. This
+          #    catches tampering of the accepted event log (signatures/replay) and
+          #    of any witness (reproduce). It does NOT re-derive frontier.json /
+          #    bounds.json / vela.lock, so those are guarded separately below.
+          vela check . --strict >/dev/null 2>&1 || hold $'Not auto-merged: the event log failed replay/signature verification (vela check --strict). A maintainer reviews.'
+          vela reproduce . >/dev/null 2>&1 || hold $'Not auto-merged: a witness failed to reproduce under the frozen verifier. A maintainer reviews.'
 
-          # 2. ADDITIVE ONLY. The published record — bounds.json, frontier.json/
-          #    .yaml, vela.lock — must be untouched, and the PR must change nothing
-          #    outside the append-only store. A real beat only ADDS the landed
-          #    record (records/vrc_*.json), the witness, and its targets.json entry.
+          # 2. GUARD. A legit land rewrites the derived views (frontier.json,
+          #    proof/, vela.lock state hashes) — the hub re-derives those from the
+          #    .vela log and the Action re-derives machine_verified from scratch, so
+          #    they are caches, not trusted inputs. Only two inputs the Action DOES
+          #    trust are not re-derived by the floor, so they are pinned:
+          #      - bounds.json: the beat oracle (read from BASE below); a producer's
+          #        beat never touches it, and a merged edit would poison later beats.
+          #      - vela.lock's vela_version: the pinned verifier; a legit land churns
+          #        the state hashes but never the version, so block a downgrade.
+          #    Everything the PR changes must fall inside the append-only store plus
+          #    those derived views; anything else (bounds.json, .github/, docs, …)
+          #    holds for a human.
           changed=$(git diff --name-only "origin/$BASE...HEAD" || true)
-          if echo "$changed" | grep -qxE 'bounds\.json|frontier\.(json|yaml)|vela\.lock'; then
-            hold $'Not auto-merged: this PR changes the published record (bounds.json / frontier.json / vela.lock), not just an additive beat. A maintainer reviews.'
+          if echo "$changed" | grep -vE '^(witnesses/|\.vela/|records/|frontier\.json$|proof/|vela\.lock$)' | grep -q .; then
+            hold "$(printf 'Not auto-merged: this PR changes files outside the append-only store and its derived views (allowed: witnesses/, .vela/, records/, frontier.json, proof/, vela.lock). A maintainer reviews.\n\nchanged:\n%s' "$(echo "$changed" | grep -vE '^(witnesses/|\.vela/|records/|frontier\.json$|proof/|vela\.lock$)' | sed 's/^/  /')")"
           fi
-          if echo "$changed" | grep -vE '^(witnesses/|\.vela/|records/)' | grep -q .; then
-            hold "$(printf 'Not auto-merged: this PR changes files outside the append-only store (`witnesses/`, `.vela/`, `records/`). A maintainer reviews.\n\nchanged:\n%s' "$(echo "$changed" | sed 's/^/  /')")"
+          base_ver=$(git show "origin/$BASE:vela.lock" 2>/dev/null | sed -n 's/^vela_version:[[:space:]]*//p')
+          head_ver=$(sed -n 's/^vela_version:[[:space:]]*//p' vela.lock 2>/dev/null)
+          if [ -n "$base_ver" ] && [ "$base_ver" != "$head_ver" ]; then
+            hold "Not auto-merged: this PR changes the pinned verifier (vela_version $base_ver -> $head_ver). A maintainer reviews."
           fi
 
           # 3. THE NEW FINDINGS. New entries in the witness map, diffed against the
